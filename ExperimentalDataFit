@@ -1,0 +1,149 @@
+%load exp data
+%remember to remove the phosphorus one again
+clear; clc; close all;
+fprintf('\n Loading experimental AM data and fitting red model...\n');
+
+% Load AM Data
+am_filename = 'AM_dataa.csv';  
+am_data = readmatrix(am_filename);  
+am_data(1:2, :) = []; % Remove first two rows  
+
+% Extract Magnetic Field and Signal Data
+B_field_AM = am_data(:,1); 
+valid_idx_AM = (B_field_AM >= 1.3205) & (B_field_AM <= 1.3275); 
+B_field_AM = B_field_AM(valid_idx_AM); 
+X_AM_avg = am_data(valid_idx_AM, 81) - am_data(valid_idx_AM, 83); 
+
+% Polynomial Background Subtraction
+poly_order = 2;
+poly_coeffs = polyfit(B_field_AM, X_AM_avg, poly_order); 
+poly_fit = polyval(poly_coeffs, B_field_AM); 
+X_AM_corrected = X_AM_avg - poly_fit; 
+
+% Ensure the corrected data touches y = 0 at minimum
+X_AM_corrected = X_AM_corrected - min(X_AM_corrected); 
+
+% Compute Experimental Peak Position and FWHM
+[~, peak_idx_exp] = max(X_AM_corrected); 
+B_peak_exp = B_field_AM(peak_idx_exp); 
+exp_fwhm = calculate_fwhm(B_field_AM, X_AM_corrected); 
+
+fprintf('Experimental Peak Position: %.4f T, Experimental FWHM: %.4f mT\n', B_peak_exp, exp_fwhm); 
+
+%deifne intial model
+Sys.S = 1/2; 
+Sys.Nucs = '31P';  % Phosphorus-31 hyperfine shift
+Sys.A = [117.5, 117.5, 117.5]; % MHz, non-isotropic
+Sys.g = [1.9985, 1.9985, 1.9985];  
+Sys.lwpp = 0.26; % Apply correct broadening
+
+% Experimental parameters
+Exp.mwFreq = 37.0735; 
+Exp.Range = [1.3214 1.32478] * 1e3; 
+Exp.Harmonic = 0; 
+Exp.CrystalSymmetry = 227; 
+
+% Generate Red Model (Fitted to Experimental Data)
+[B_field_EPR, EPR_spectrum] = pepper(Sys, Exp); 
+EPR_spectrum = EPR_spectrum / max(abs(EPR_spectrum)) * max(abs(X_AM_corrected)); % Normalize
+
+%shift red model
+target_shift_mT = -0.1 ;  
+desired_shift = target_shift_mT / 1000; 
+
+% Initialize A search
+low_A_shift = -1;  
+high_A_shift = -2;  
+tolerance = 1e-6;  
+best_shift_diff = inf; 
+best_A_shift = 0; 
+
+fprintf('\n Searching for phosphorus-31 hyperfine shift to match %.2f mT field shift...\n', target_shift_mT);
+
+% Loop Over Hyperfine Values
+while (high_A_shift - low_A_shift) > tolerance
+    test_A_shift = (low_A_shift + high_A_shift) / 2;
+
+    % Modify phosphorus-31 hyperfine A values
+    Sys_shifted = Sys;
+    Sys_shifted.A = Sys.A + test_A_shift;  
+
+    % Generate new shifted EPR spectrum
+    [B_field_EPR_shifted, EPR_spectrum_shifted] = pepper(Sys_shifted, Exp);
+    EPR_spectrum_shifted = EPR_spectrum_shifted / max(abs(EPR_spectrum_shifted)) * max(abs(EPR_spectrum));
+
+    % Find peak of the shifted model
+    [~, peak_idx_shifted] = max(EPR_spectrum_shifted); %EPR spectrum shifted is not a number
+    B_peak_shifted = B_field_EPR_shifted(peak_idx_shifted) / 1e3; 
+
+    % Compute shift difference
+    shift_diff = (B_peak_shifted - B_peak_exp) - desired_shift;
+
+    fprintf(' A Shift: %.6f MHz, B_peak_shifted: %.6f T (Target: %.6f T)\n', test_A_shift, B_peak_shifted, B_peak_exp + desired_shift);
+
+    if abs(shift_diff) < best_shift_diff  
+        best_shift_diff = abs(shift_diff);
+        best_A_shift = test_A_shift;
+    end
+
+    if B_peak_shifted < (B_peak_exp + desired_shift)
+        low_A_shift = test_A_shift;  
+    else
+        high_A_shift = test_A_shift;  
+    end
+end
+
+% Compute Final Change in A
+delta_A = best_A_shift;
+
+fprintf('\n Final Hyperfine Shift (ΔA) Needed for %.2f mT Shift:\n', target_shift_mT);
+fprintf('   31P: ΔA = [%.4f  %.4f  %.4f] MHz\n', delta_A, delta_A, delta_A);
+
+% Generate Final Shifted Model
+Sys_final = Sys;
+Sys_final.A = Sys.A + best_A_shift;  
+[B_field_EPR_final, EPR_spectrum_final] = pepper(Sys_final, Exp);
+EPR_spectrum_final = EPR_spectrum_final / max(abs(EPR_spectrum_final)) * max(abs(EPR_spectrum));
+
+% Find the peak of the final shifted model
+[~, peak_idx_final] = max(EPR_spectrum_final);
+B_peak_final = B_field_EPR_final(peak_idx_final) / 1e3;
+
+
+final_shift_error = abs(B_peak_final - (B_peak_exp + desired_shift));
+
+fprintf('\n Final Shift Achieved: %.6f T (Target: %.6f T)\n', B_peak_final, B_peak_exp + desired_shift);
+
+
+if final_shift_error > tolerance
+    fprintf('WARNING: The achieved shift does not perfectly match the input shift! Adjust the search range or tolerance.\n');
+end
+
+
+figure;
+plot((B_field_AM+0.00087-1.3)*1000, (X_AM_corrected*10000)-0.038, 'k', 'LineWidth', 1.5); hold on;
+plot(((B_field_EPR / 1e3)-1.3)*1000, EPR_spectrum*10000*0.87, 'r', 'LineWidth', 1.5); % Red: Original Model
+plot(((((B_field_EPR_final+0.05) / 1e3)-1.3)*1000)-0.02, EPR_spectrum_final*10000*0.87, 'b', 'LineWidth', 1.5); % Blue: Shifted Model
+xlim([21.5 24.5]);
+xlabel('$B-1300$ (mT)', 'Interpreter','latex', 'FontSize',11);
+ylabel('$X_{corrected}$ (a.u.)', 'Interpreter', 'latex', 'FontSize', 11);
+ylim([0 0.35]);
+
+set(gca, 'FontSize', 11);
+
+%ytickformat('%.0f');  % Show y-axis ticks in fixed-point (non-scientific) format
+%title(sprintf('AM X-Averaged Signal with Simulated EPR Spectrum (Shift = %.2f mT)', target_shift_mT));
+legend('Experimental Data', ...
+       'Original Model Fit', ...
+       sprintf('$\\mathit{A}$ Shifted Model (0.018 mT)', target_shift_mT), ...
+       'Interpreter', 'latex', 'FontSize', 10);
+
+hold off;
+grid on;
+
+function fwhm = calculate_fwhm(B, spectrum)
+    max_intensity = max(spectrum);
+    half_max = max_intensity / 2;
+    indices = find(spectrum >= half_max);
+    fwhm = B(indices(end)) - B(indices(1));
+end
