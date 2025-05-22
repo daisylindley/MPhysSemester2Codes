@@ -1,0 +1,147 @@
+clear; clc; close all;
+
+% === Spin system definition ===
+Sys.S = 1/2;
+Sys.Nucs = '31P,28Si,29Si,30Si';
+Sys.Abund = {0.000001, 0.92, 0.04, 0.05}
+Sys.g = [1.9985, 1.9985, 1.9985];
+Sys.AFrame = zeros(4, 3);
+Sys.lwpp = 0.16;
+
+% === Experimental setup ===
+Exp.Field = 1325; % mT
+Exp.mwRange = [36.976 37.15]; % GHz
+Exp.nPoints = 10000;
+
+% === Strain and hyperfine setup ===
+nu = 0.28;  % Poisson ratio
+k_x_values = 0.7:0.02:1.3;   % covers −0.3% to +0.3% strain
+k_zy_values = 1 - nu * (k_x_values - 1);
+A0 = 117.5; % MHz reference value
+
+% === Expanded search window to capture all peaks ===
+search_window = [37.11, 37.14];  % GHz
+peak_freq_values = zeros(size(k_x_values));
+
+% === Custom color scheme ===
+custom_colors = [
+    0.0000, 0.4470, 0.7410;
+    0.8500, 0.3250, 0.0980;
+    0.9290, 0.6940, 0.1250;
+    0.4940, 0.1840, 0.5560;
+    0.4660, 0.6740, 0.1880;
+    0.3010, 0.7450, 0.9330;
+    0.6350, 0.0780, 0.1840;
+    0.25,   0.25,  0.25;
+    0.75,   0.25,  0.25;
+    0.00,   0.50,  0.00;
+    0.85,   0.33,  0.98;
+    0.10,   0.10,  0.10;
+    0.75,   0.75,  0.0;
+    0.20,   0.60,  0.80;
+    1.0,    0.4,   0.6;
+    0.60,   0.2,   0.6;
+    0.40,   0.40,  1.0;
+    0.60,   0.60,  0.60;
+    1.0,    0.0,   0.0;
+    0.0,    0.0,   0.0;
+    1.0,    0.5,   0.0
+];
+if length(k_x_values) > size(custom_colors, 1)
+    custom_colors = repmat(custom_colors, ceil(length(k_x_values)/size(custom_colors,1)), 1);
+end
+
+% === Figure: EPR Spectra ===
+figure;
+set(gcf, 'Position', [100, 100, 1600, 500]);
+hold on;
+legend_entries = strings(1, length(k_x_values));
+
+for i = 1:length(k_x_values)
+    k_x = k_x_values(i);
+    k_zy = k_zy_values(i);
+    
+    A_x = A0 * k_x;
+    A_zy = A0 * k_zy;
+    
+    Sys.A = [A_x A_zy A_zy;
+             0   0    0;
+             4   3.5  3.2;
+             0   0    0];
+    
+    Opt = struct('Method', 'perturb');
+    [B, spec] = pepper(Sys, Exp, Opt);
+    
+    if isempty(B) || isempty(spec)
+        peak_freq_values(i) = NaN;
+        continue;
+    end
+
+    % Plot with matching color
+    color = custom_colors(i, :);
+    plot(B, spec / 1e6, 'Color', color, 'LineWidth', 1.2);
+    legend_entries(i) = sprintf('$k_x = %.2f$', k_x);
+    
+    % Peak detection in expanded window
+    idx_window = B >= search_window(1) & B <= search_window(2);
+    spec_window = smoothdata(spec(idx_window), 'gaussian', 15);
+    [pks, locs] = findpeaks(spec_window, B(idx_window), 'MinPeakProminence', 0.01);
+    
+    if ~isempty(pks)
+        peak_freq_values(i) = max(locs);
+    else
+        peak_freq_values(i) = NaN;
+        fprintf('No peak found for k_x = %.2f\n', k_x); % debugging output
+    end
+end
+
+xlabel('$\nu_{\mathrm{res}}$ (GHz)', 'Interpreter', 'latex', 'FontSize', 14);
+ylabel('$S_{\mathrm{CW}}$ (a.u.)', 'Interpreter', 'latex', 'FontSize', 14);
+legend(legend_entries, 'Interpreter', 'latex', 'Location', 'eastoutside');
+set(gca, 'FontSize', 14);
+xlim([36.976 37.15]);
+ylim([0 12]);
+grid on;
+box on;
+hold off;
+
+% === Post-processing for shift plot ===
+valid_idx = ~isnan(peak_freq_values);
+k_x_values = k_x_values(valid_idx);
+k_zy_values = k_zy_values(valid_idx);
+peak_freq_values = peak_freq_values(valid_idx);
+
+strain_percent = (100 / 79.2) * (k_x_values - 1);  % Convert to percent
+reference_freq = peak_freq_values(1);  % Reference is now the leftmost (lowest k_x / highest negative strain)
+freq_shifts = (peak_freq_values - reference_freq) * 1e3; % in MHz
+
+% === Frequency Shift Plot ===
+figure('Units', 'inches', 'Position', [1, 1, 8, 4]);
+set(gca, 'FontSize', 14);
+hold on;
+
+% Use red markers
+scatter_color = [1, 0, 0];
+h_data = scatter(strain_percent, freq_shifts, 50, scatter_color, ...
+    'Marker', 'x', 'LineWidth', 2, 'DisplayName', 'Data Points');
+
+% Fit and plot regression line
+if length(strain_percent) > 2
+    p_fit = polyfit(strain_percent, freq_shifts, 1);
+    fit_line = polyval(p_fit, strain_percent);
+    h_fit = plot(strain_percent, fit_line, '-k', 'LineWidth', 1.2, 'DisplayName', 'Linear Fit');
+    
+    eq_str = sprintf('$\\nu_{\\mathrm{res}} = %.3f\\cdot\\mathrm{Strain\\ (\\%%)} %+ .3f$', p_fit(1), p_fit(2));
+
+    legend([h_data, h_fit], {'Data Points', eq_str}, ...
+        'Interpreter', 'latex', 'FontSize', 12, 'Location', 'best');
+else
+    legend(h_data, 'Data Points', 'Location', 'best');
+end
+
+xlabel('$\mathrm{Strain}$ (\%)', 'Interpreter', 'latex', 'FontSize', 14);
+ylabel('$\Delta\nu_{\mathrm{res}}$ (MHz)', 'Interpreter', 'latex', 'FontSize', 14);
+xlim([-0.25 0.25]);
+grid on;
+box on;
+hold off;
